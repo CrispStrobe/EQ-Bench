@@ -1,9 +1,20 @@
+# scoring.py
 import re
 import json
 import math
 
+def remove_think_blocks(text):
+    """Remove all content between <think> and </think> tags."""
+    return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+
 # Parse the emotion intensity ratings from the raw inference text
-def parse_answers(text, REVISE):
+def parse_answers_old(text, REVISE):
+	"""
+	Parse emotion scores from the model output, ignoring content between <think> tags.
+	Returns two dictionaries: first_pass_answers and revised_answers.
+	"""
+	# First remove any think blocks
+	text = remove_think_blocks(text)
 	first_pass_answers = {}
 	revised_answers = {}
 
@@ -25,8 +36,55 @@ def parse_answers(text, REVISE):
 
 	return first_pass_answers, revised_answers
 
+def parse_answers(text, REVISE):
+    """
+    Parse emotion scores from the model output, ignoring content between <think> tags.
+    Returns two dictionaries: first_pass_answers and revised_answers.
+    """
+    
+    # First remove any think blocks
+    text = remove_think_blocks(text)
+    first_pass_answers = {}
+    revised_answers = {}
+
+    def extract_first_four(text_segment):
+        """Extracts the first four word-number pairs from a given text segment."""
+        matches = re.findall(r'(\w+):\s+(\d+)', text_segment)
+        if len(matches) < 4:
+            print(f'! Warning: Expected 4 emotions, but found {len(matches)}. Extracted: {matches}')
+        return dict(matches[:4])
+
+    # Extracting first pass answers
+    if REVISE:
+        first_pass_match = re.search(r'First pass scores:(.*?)Revised scores:', text, re.DOTALL | re.IGNORECASE)
+        if first_pass_match:
+            first_pass_text = first_pass_match.group(1)
+            first_pass_answers = extract_first_four(first_pass_text)
+        else:
+            print('! Warning: "First pass scores" section not found.')
+
+        # Extracting revised answers
+        revised_match = re.search(r'Revised scores:(.*?)$', text, re.DOTALL | re.IGNORECASE)
+        if revised_match:
+            revised_text = revised_match.group(1)
+            revised_answers = extract_first_four(revised_text)
+        else:
+            print('! Warning: "Revised scores" section not found.')
+    else:
+        # When REVISE is False, extract only the first four emotion scores
+        first_pass_answers = extract_first_four(text)
+
+    return first_pass_answers, revised_answers
+
 # we parse answers in German language ("de")
 def parse_answers_de(text, REVISE):
+    """
+    Parse emotion scores from German language model output, ignoring content between <think> tags.
+    Returns two dictionaries: first_pass_answers and revised_answers.
+    """
+    # First remove any think blocks
+    text = remove_think_blocks(text)
+
     #print("Using german parsing.")
     first_pass_answers = {}
     revised_answers = {}
@@ -63,8 +121,8 @@ def calculate_score_fullscale(reference, user):
 	emotions_dict = {}
 	for emotion, user_emotion_score in user.items():
 		for i in range(1, 5):
-			if emotion.lower() == reference[f'emotion{i}'].lower():
-				emotions_dict[emotion.lower()] = True
+			if emotion == reference[f'emotion{i}']:
+				emotions_dict[emotion] = True
 	if len(emotions_dict) != 4:
 		print('! Error: emotions did not match reference')
 		print(user)
@@ -76,7 +134,7 @@ def calculate_score_fullscale(reference, user):
 	for emotion, user_emotion_score in user.items():
 		# If this emotion is in the reference, calculate the difference between the user's score and the reference score.
 		for i in range(1, 5):
-			if emotion.lower() == reference[f'emotion{i}'].lower():
+			if emotion == reference[f'emotion{i}']:
 				d = abs(float(user_emotion_score) - float(reference[f'emotion{i}_score']))
 				# this will be a value between 0 and 10
 				if d == 0:
@@ -108,7 +166,7 @@ def calculate_score(reference, user):
 	emotions_dict = {}
 	for emotion, user_emotion_score in user.items():
 		for i in range(1, 5):
-			if emotion.lower() == reference[f'emotion{i}'].lower():
+			if emotion == reference[f'emotion{i}']:
 				emotions_dict[emotion] = True
 	if len(emotions_dict) != 4:
 		print('! Error: emotions did not match reference')
@@ -140,7 +198,7 @@ def calculate_score(reference, user):
 	return final_score
 
 # Calculate overall benchmark score
-def calculate_eq_bench_score(run_index, results, results_path, fullscale=False):
+def calculate_benchmark_score(run_index, results, results_path, fullscale=False):
 	# We calculate an overall score for first pass answers and revised answers separately.
 	# The final score is the best of these two numbers.
 
@@ -218,107 +276,3 @@ def calculate_eq_bench_score(run_index, results, results_path, fullscale=False):
 		json.dump(results, f)
 
 	return (averaged_score, round(parseable_tally / n_iterations, 2))
-
-
-neg_criteria = [
-				"melodramatic",
-				"shallow resolution",
-				"unearned resolution",  # old naming
-				"simplistic moralizing",
-				"shallow optimism",
-				"forced optimism", # old naming
-				"trite",
-				"overwrought",
-				"amateurish",
-				"contrived",
-				"uninspiring",
-				"characters are too good",
-				"incongruent ending positivity",
-				"unearned transformations",
-				"profundity over-reach",
-				"amateurish descriptives",
-				"clunky asides and interruptive sentence structures",
-				"stilted dialogue",
-				"tit-for-tat dialogue"
-			]
-
-def calculate_creative_writing_score(run_index, results, results_path):
-	RELATIVE_SCORING = False
-	prompt_scores = []  # List to hold total scores for each prompt
-	iteration_averages = []  # To hold the average scores of the best half of each iteration
-	
-	for run_iter in results[run_index]['iterations']:
-		prompt_scores = []
-		for prompt_id, scores in results[run_index]['iterations'][run_iter]['individual_scores'].items():
-			scoresum = 0
-			
-			for criteria, score in scores.items():
-					criteria_lower = criteria.lower().strip()
-					if RELATIVE_SCORING:
-						if any(neg_criterion in criteria_lower for neg_criterion in neg_criteria):
-							scoresum += ((-1 * score) + 10) / 2
-						else:
-							scoresum += (score + 10) / 2
-					else:
-						if any(neg_criterion in criteria_lower for neg_criterion in neg_criteria):
-							scoresum += 10 - score
-						else:
-							scoresum += score
-			if len(scores):
-				prompt_scores.append(scoresum / len(scores))
-
-		if len(prompt_scores) > 10:
-			iteration_average = sum(prompt_scores) / len(prompt_scores)
-			iteration_averages.append(iteration_average)
-
-	# Average of iteration averages
-	if iteration_averages:
-		creative_writing_averaged_score = sum(iteration_averages) / len(iteration_averages)
-	else:
-		creative_writing_averaged_score = 0
-
-	return round(10 * creative_writing_averaged_score, 2)
-
-
-def calculate_creative_writing_score_judgemark(run_index, model_name, results):	
-	RELATIVE_SCORING = False	
-	iteration_averages = []  # To hold the average scores of the best half of each iteration
-	raw_criteria_scores = []
-	individual_item_scores = []
-
-	for run_iter in results[run_index]['iterations']:		
-		if int(run_iter) != 1:
-			# limit judgemark to 1 iteration for now
-			continue
-		prompt_scores = []
-		for prompt_id, scores in results[run_index]['iterations'][run_iter]['judgemark_results'][model_name]['individual_scores'].items():
-			scoresum = 0
-			for criteria, score in scores.items():
-					criteria_lower = criteria.lower().strip()
-					if RELATIVE_SCORING:						
-						if any(neg_criterion in criteria_lower for neg_criterion in neg_criteria):
-							this_criteria_score = ((-1 * score) + 10) / 2
-						else:
-							this_criteria_score = (score + 10) / 2
-					else:
-						if any(neg_criterion in criteria_lower for neg_criterion in neg_criteria):
-							this_criteria_score = 10 - score
-						else:
-							this_criteria_score = score
-					scoresum += this_criteria_score
-					raw_criteria_scores.append(10*this_criteria_score)
-			if len(scores):
-				prompt_scores.append(scoresum / len(scores))
-				individual_item_scores.append(10*scoresum / len(scores))
-
-		if len(prompt_scores) > 10:
-			iteration_average = sum(prompt_scores) / len(prompt_scores)
-			iteration_averages.append(iteration_average)
-
-	# Average of iteration averages
-	if iteration_averages:
-		creative_writing_averaged_score = sum(iteration_averages) / len(iteration_averages)
-	else:
-		creative_writing_averaged_score = 0
-
-	return round(10 * creative_writing_averaged_score, 2), raw_criteria_scores, individual_item_scores
